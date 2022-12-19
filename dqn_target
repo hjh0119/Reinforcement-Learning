@@ -1,0 +1,100 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import gym
+
+#hyperParameters
+BATCH_SIZE = 32
+LR = 0.01
+EPSILON = 0.9
+GAMMA = 0.9
+TARGET_REPLACE_ITER = 100
+MEMORY_CAPACITY = 2000
+env = gym.make('CartPole-v0').unwrapped
+N_ACTIONS = env.action_space.n
+N_STATES = env.observation_space.shape[0]
+NUM_EPISODES = 4000
+
+class Net(nn.Module):
+    def __init__(self):
+        super(Net,self).__init__()
+        self.fc1 = nn.Linear(N_STATES,100)
+        self.fc1.weight.data.normal_(0,0.1)
+        self.fc2 = nn.Linear(100,N_ACTIONS)
+        self.fc2.weight.data.normal_(0,0.1)
+
+    def forward(self,x):
+        x = F.relu(self.fc1(x))
+        action_value = self.fc2(x)
+        return action_value
+
+class DQN():
+    def __init__(self):
+        super(DQN,self).__init__()
+        self.target_net,self.q_net = Net(), Net()
+        self.replay_buffer = np.zeros((MEMORY_CAPACITY, N_STATES * 2 + 2))
+        self.memory_counter = 0 
+        self.learn_step_counter = 0
+        self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=LR)
+        self.loss_func = nn.MSELoss()
+    
+    def select_action(self,state):
+        state = torch.tensor(state, dtype = torch.float).unsqueeze(0)
+        action_value = self.q_net(state)
+        _, index = action_value.max(1)
+        action = index.item()
+        if np.random.rand(1) >= 0.9:
+            action = np.random.choice(range(N_ACTIONS), 1).item()
+        return action
+    
+    def store_transition(self,s,a,r,s_):
+        index = self.memory_counter % MEMORY_CAPACITY
+        #####
+        transition = np.hstack((s,[a,r],s_))
+        self.replay_buffer[index,:] = transition
+        self.memory_counter += 1
+    
+    def update(self):
+        if self.learn_step_counter % TARGET_REPLACE_ITER == 0 :
+            self.target_net.load_state_dict(self.q_net.state_dict())
+        self.learn_step_counter += 1
+        sample_index = np.random.choice(MEMORY_CAPACITY,BATCH_SIZE)
+        tmp_replay_buffer = self.replay_buffer[sample_index,:]
+        tmp_s = torch.FloatTensor(tmp_replay_buffer[:, :N_STATES])
+        #####
+        tmp_a = torch.LongTensor(tmp_replay_buffer[:, N_STATES:N_STATES+1].astype(int))
+        tmp_r = torch.FloatTensor(tmp_replay_buffer[:, N_STATES+1:N_STATES+2])
+        tmp_s_ = torch.FloatTensor(tmp_replay_buffer[:, -N_STATES:])
+        with torch.no_grad():
+            #######
+            TD_target = tmp_r + GAMMA * self.target_net(tmp_s_).max(1)[0].view(BATCH_SIZE,1)
+        q_value = self.q_net(tmp_s).gather(1,tmp_a)
+        loss = self.loss_func(q_value, TD_target)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+dqn = DQN()
+for i in range(NUM_EPISODES):
+    s = env.reset()
+    s = s[0]
+    episode_reward_sum = 0
+    while True:
+        a = dqn.select_action(s)
+        s_, r, done, info, _ = env.step(a)
+        x, x_dot, theta, theta_dot = s_
+        r1 = (env.x_threshold - abs(x)) / env.x_threshold - 0.8
+        r2 = (env.theta_threshold_radians - abs(theta)) / env.theta_threshold_radians - 0.5
+        new_r = r1 + r2
+        dqn.store_transition(s,a,new_r,s_)
+        episode_reward_sum += new_r
+        # dqn.store_transition(s,a,r,s_)
+        # episode_reward_sum += r
+        s = s_
+        if dqn.memory_counter > MEMORY_CAPACITY:
+            dqn.update()
+        if done:
+            print('episode%s---reward_sum: %s' % (i, round(episode_reward_sum, 2)))
+            break
+env.close()
